@@ -171,3 +171,137 @@
     none
   )
 )
+
+
+;; (define-trait nft-trait
+;;   (
+;;     ;; Returns the owner of the given token-id, or none if not found
+;;     (get-owner? (uint) (optional principal))
+;;     ;; Transfers the token-id from sender to recipient
+;;     (transfer? (uint principal principal) (response bool uint))
+;;     ;; Mints a new token-id to the recipient
+;;     (mint? (uint principal) (response bool uint))
+;;     ;; Burns the token-id
+;;     (burn? (uint) (response bool uint))
+;;   )
+;; )
+;; (impl-trait .proof-of-participations_.nft-trait)
+
+(define-constant err-not-token-owner (err u101))
+(define-constant err-milestone-not-reached (err u102))
+(define-constant err-badge-already-minted (err u103))
+
+(define-non-fungible-token participation-badge uint)
+
+(define-data-var last-token-id uint u0)
+(define-data-var token-uri (string-ascii 256) "https://api.participation-badges.com/metadata/")
+
+(define-map token-metadata
+  { token-id: uint }
+  {
+    milestone: uint,
+    minted-at: uint,
+    owner: principal
+  }
+)
+
+(define-map user-badges
+  { owner: principal }
+  { badges: (list 20 uint) }
+)
+
+(define-constant milestones (list u1 u5 u10 u25 u50 u100))
+
+(define-read-only (get-last-token-id)
+  (ok (var-get last-token-id))
+)
+
+(define-read-only (get-token-uri (token-id uint))
+  (ok (some (concat (var-get token-uri) (uint-to-ascii token-id))))
+)
+
+(define-read-only (get-owner (token-id uint))
+  (ok (nft-get-owner? participation-badge token-id))
+)
+
+(define-read-only (get-token-metadata (token-id uint))
+  (map-get? token-metadata { token-id: token-id })
+)
+
+(define-read-only (get-user-badges (owner principal))
+  (default-to (list) (get badges (map-get? user-badges { owner: owner })))
+)
+
+(define-read-only (can-mint-milestone-badge (participant principal) (participation-count uint))
+  (let
+    (
+      (eligible-milestones (filter check-milestone-eligibility milestones))
+      (user-badges-list (get-user-badges participant))
+    )
+    (> (len eligible-milestones) u0)
+  )
+)
+
+(define-private (check-milestone-eligibility (milestone uint))
+  true
+)
+
+(define-public (mint-milestone-badge (participant principal) (participation-count uint) (milestone uint))
+  (let
+    (
+      (token-id (+ (var-get last-token-id) u1))
+      (current-badges (get-user-badges participant))
+    )
+    (asserts! (>= participation-count milestone) err-milestone-not-reached)
+    (asserts! (is-none (index-of milestones milestone)) (err u104))
+    
+    (try! (nft-mint? participation-badge token-id participant))
+    
+    (map-set token-metadata
+      { token-id: token-id }
+      {
+        milestone: milestone,
+        minted-at: stacks-block-height,
+        owner: participant
+      }
+    )
+    
+    (map-set user-badges
+      { owner: participant }
+      { badges: (unwrap! (as-max-len? (append current-badges token-id) u20) (err u999)) }
+    )
+    
+    (var-set last-token-id token-id)
+    (ok token-id)
+  )
+)
+
+(define-public (transfer (token-id uint) (sender principal) (recipient principal))
+  (begin
+    (asserts! (is-eq tx-sender sender) err-not-token-owner)
+    (try! (nft-transfer? participation-badge token-id sender recipient))
+    
+    (map-set token-metadata
+      { token-id: token-id }
+      (merge 
+        (unwrap-panic (map-get? token-metadata { token-id: token-id }))
+        { owner: recipient }
+      )
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (set-token-uri (new-uri (string-ascii 256)))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set token-uri new-uri)
+    (ok true)
+  )
+)
+
+(define-private (uint-to-ascii (value uint))
+  (if (is-eq value u0) "0"
+    (if (< value u10) (unwrap-panic (element-at "0123456789" value))
+      "multi-digit")))
