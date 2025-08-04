@@ -31,6 +31,20 @@
   { event-count: uint }
 )
 
+(define-map leaderboard-scores
+  { participant: principal }
+  { 
+    total-score: uint,
+    last-updated: uint,
+    rank-position: uint
+  }
+)
+
+(define-map event-weights
+  { event-id: uint }
+  { weight-multiplier: uint }
+)
+
 (define-data-var next-event-id uint u1)
 
 (define-read-only (get-event (event-id uint))
@@ -117,6 +131,7 @@
       { event-count: (+ current-count u1) }
     )
     
+    (update-leaderboard-score tx-sender event-id)
     (ok true)
   )
 )
@@ -170,6 +185,63 @@
     })
     none
   )
+)
+
+(define-read-only (get-leaderboard-score (participant principal))
+  (default-to 
+    { total-score: u0, last-updated: u0, rank-position: u999999 }
+    (map-get? leaderboard-scores { participant: participant })
+  )
+)
+
+(define-read-only (get-event-weight (event-id uint))
+  (default-to u1 (get weight-multiplier (map-get? event-weights { event-id: event-id })))
+)
+
+(define-private (calculate-score-boost (event-id uint) (participation-count uint))
+  (let
+    (
+      (base-score u10)
+      (weight (get-event-weight event-id))
+      (popularity-bonus (if (> participation-count u50) u5 u0))
+    )
+    (* (* base-score weight) (+ u1 popularity-bonus))
+  )
+)
+
+(define-private (update-leaderboard-score (participant principal) (event-id uint))
+  (let
+    (
+      (current-score (get-leaderboard-score participant))
+      (event-data (unwrap-panic (map-get? events { event-id: event-id })))
+      (score-boost (calculate-score-boost event-id (get total-participants event-data)))
+      (new-total-score (+ (get total-score current-score) score-boost))
+    )
+    (map-set leaderboard-scores
+      { participant: participant }
+      {
+        total-score: new-total-score,
+        last-updated: stacks-block-height,
+        rank-position: (get rank-position current-score)
+      }
+    )
+  )
+)
+
+(define-public (set-event-weight (event-id uint) (weight uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-some (map-get? events { event-id: event-id })) err-event-not-found)
+    (map-set event-weights
+      { event-id: event-id }
+      { weight-multiplier: weight }
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-top-participants (limit uint))
+  (ok "leaderboard-query-not-implemented")
 )
 
 
