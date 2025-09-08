@@ -5,6 +5,9 @@
 (define-constant err-already-participated (err u103))
 (define-constant err-event-already-exists (err u104))
 (define-constant err-invalid-end-block (err u105))
+(define-constant err-invalid-delegate (err u106))
+(define-constant err-self-delegation (err u107))
+(define-constant err-no-delegation-found (err u108))
 
 (define-map events
   { event-id: uint }
@@ -43,6 +46,15 @@
 (define-map event-weights
   { event-id: uint }
   { weight-multiplier: uint }
+)
+
+(define-map delegation-registry
+  { delegator: principal }
+  { 
+    delegate: principal,
+    delegated-at: uint,
+    is-active: bool
+  }
 )
 
 (define-data-var next-event-id uint u1)
@@ -198,6 +210,28 @@
   (default-to u1 (get weight-multiplier (map-get? event-weights { event-id: event-id })))
 )
 
+(define-read-only (get-delegation-info (delegator principal))
+  (map-get? delegation-registry { delegator: delegator })
+)
+
+(define-read-only (has-active-delegation (delegator principal))
+  (match (map-get? delegation-registry { delegator: delegator })
+    delegation-info (get is-active delegation-info)
+    false
+  )
+)
+
+(define-read-only (get-effective-participant (participant principal))
+  (match (map-get? delegation-registry { delegator: participant })
+    delegation-info 
+      (if (get is-active delegation-info)
+        (get delegate delegation-info)
+        participant
+      )
+    participant
+  )
+)
+
 (define-private (calculate-score-boost (event-id uint) (participation-count uint))
   (let
     (
@@ -242,6 +276,69 @@
 
 (define-read-only (get-top-participants (limit uint))
   (ok "leaderboard-query-not-implemented")
+)
+
+(define-public (delegate-participation (delegate principal))
+  (begin
+    (asserts! (not (is-eq tx-sender delegate)) err-self-delegation)
+    (map-set delegation-registry
+      { delegator: tx-sender }
+      {
+        delegate: delegate,
+        delegated-at: stacks-block-height,
+        is-active: true
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (revoke-delegation)
+  (let
+    (
+      (delegation-info (unwrap! (map-get? delegation-registry { delegator: tx-sender }) err-no-delegation-found))
+    )
+    (map-set delegation-registry
+      { delegator: tx-sender }
+      (merge delegation-info { is-active: false })
+    )
+    (ok true)
+  )
+)
+
+(define-public (participate-as-delegate (event-id uint) (delegator principal) (participation-data (string-ascii 100)))
+  (let
+    (
+      (event-data (unwrap! (map-get? events { event-id: event-id }) err-event-not-found))
+      (delegation-info (unwrap! (map-get? delegation-registry { delegator: delegator }) err-no-delegation-found))
+      (current-count (get-user-event-count delegator))
+    )
+    (asserts! (is-event-active event-id) err-event-not-active)
+    (asserts! (get is-active delegation-info) err-invalid-delegate)
+    (asserts! (is-eq tx-sender (get delegate delegation-info)) err-invalid-delegate)
+    (asserts! (not (has-participated event-id delegator)) err-already-participated)
+    
+    (map-set participants
+      { event-id: event-id, participant: delegator }
+      {
+        participated-at: stacks-block-height,
+        participation-data: participation-data
+      }
+    )
+    
+    (map-set events
+      { event-id: event-id }
+      (merge event-data { total-participants: (+ (get total-participants event-data) u1) })
+    )
+    
+    (map-set user-events
+      { participant: delegator }
+      { event-count: (+ current-count u1) }
+    )
+    
+    (update-leaderboard-score delegator event-id)
+    (ok true)
+  )
 )
 
 
