@@ -8,6 +8,7 @@
 (define-constant err-invalid-delegate (err u106))
 (define-constant err-self-delegation (err u107))
 (define-constant err-no-delegation-found (err u108))
+(define-constant err-streak-broken (err u109))
 
 (define-map events
   { event-id: uint }
@@ -57,7 +58,23 @@
   }
 )
 
+(define-map participation-streaks
+  { participant: principal }
+  {
+    current-streak: uint,
+    longest-streak: uint,
+    last-event-id: uint,
+    streak-multiplier: uint
+  }
+)
+
+(define-map streak-milestones
+  { participant: principal, milestone: uint }
+  { achieved-at: uint }
+)
+
 (define-data-var next-event-id uint u1)
+(define-data-var streak-bonus-rate uint u2)
 
 (define-read-only (get-event (event-id uint))
   (map-get? events { event-id: event-id })
@@ -143,6 +160,7 @@
       { event-count: (+ current-count u1) }
     )
     
+    (update-streak tx-sender event-id)
     (update-leaderboard-score tx-sender event-id)
     (ok true)
   )
@@ -232,6 +250,30 @@
   )
 )
 
+(define-read-only (get-streak-info (participant principal))
+  (default-to 
+    { current-streak: u0, longest-streak: u0, last-event-id: u0, streak-multiplier: u1 }
+    (map-get? participation-streaks { participant: participant })
+  )
+)
+
+(define-read-only (get-streak-milestone (participant principal) (milestone uint))
+  (map-get? streak-milestones { participant: participant, milestone: milestone })
+)
+
+(define-read-only (calculate-streak-bonus (current-streak uint))
+  (let
+    (
+      (bonus-rate (var-get streak-bonus-rate))
+      (tier-bonus (if (>= current-streak u50) u100
+                    (if (>= current-streak u25) u50
+                    (if (>= current-streak u10) u20
+                    (if (>= current-streak u5) u10 u0)))))
+    )
+    (+ (* current-streak bonus-rate) tier-bonus)
+  )
+)
+
 (define-private (calculate-score-boost (event-id uint) (participation-count uint))
   (let
     (
@@ -243,13 +285,54 @@
   )
 )
 
+(define-private (update-streak (participant principal) (event-id uint))
+  (let
+    (
+      (streak-info (get-streak-info participant))
+      (last-event (get last-event-id streak-info))
+      (is-consecutive (is-eq event-id (+ last-event u1)))
+      (new-streak (if is-consecutive (+ (get current-streak streak-info) u1) u1))
+      (new-longest (if (> new-streak (get longest-streak streak-info)) new-streak (get longest-streak streak-info)))
+      (multiplier (+ u1 (/ new-streak u5)))
+    )
+    (map-set participation-streaks
+      { participant: participant }
+      {
+        current-streak: new-streak,
+        longest-streak: new-longest,
+        last-event-id: event-id,
+        streak-multiplier: multiplier
+      }
+    )
+    (check-and-record-milestone participant new-streak)
+  )
+)
+
+(define-private (check-and-record-milestone (participant principal) (streak uint))
+  (let
+    (
+      (milestone-thresholds (list u5 u10 u25 u50 u100))
+    )
+    (if (or (is-eq streak u5) (is-eq streak u10) (is-eq streak u25) (is-eq streak u50) (is-eq streak u100))
+      (map-set streak-milestones
+        { participant: participant, milestone: streak }
+        { achieved-at: stacks-block-height }
+      )
+      false
+    )
+  )
+)
+
 (define-private (update-leaderboard-score (participant principal) (event-id uint))
   (let
     (
       (current-score (get-leaderboard-score participant))
       (event-data (unwrap-panic (map-get? events { event-id: event-id })))
       (score-boost (calculate-score-boost event-id (get total-participants event-data)))
-      (new-total-score (+ (get total-score current-score) score-boost))
+      (streak-info (get-streak-info participant))
+      (streak-bonus (calculate-streak-bonus (get current-streak streak-info)))
+      (total-boost (+ score-boost streak-bonus))
+      (new-total-score (+ (get total-score current-score) total-boost))
     )
     (map-set leaderboard-scores
       { participant: participant }
@@ -336,7 +419,16 @@
       { event-count: (+ current-count u1) }
     )
     
+    (update-streak delegator event-id)
     (update-leaderboard-score delegator event-id)
+    (ok true)
+  )
+)
+
+(define-public (set-streak-bonus-rate (new-rate uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set streak-bonus-rate new-rate)
     (ok true)
   )
 )
