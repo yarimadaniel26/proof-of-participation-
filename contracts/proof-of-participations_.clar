@@ -1,4 +1,64 @@
 (define-constant contract-owner tx-sender)
+
+(define-constant err-not-admin u100)
+(define-constant err-already-issued u101)
+(define-constant err-not-owner u102)
+(define-constant err-not-issued u103)
+
+(define-data-var total-issued uint u0)
+
+(define-map badges
+  { user: principal }
+  { issued: bool })
+
+(define-map operators
+  { user: principal }
+  { active: bool })
+
+(define-read-only (is-admin (who principal))
+  (or
+    (is-eq who contract-owner)
+    (match (map-get? operators { user: who })
+      entry (get active entry)
+      false)))
+
+(define-public (set-operator (who principal) (active bool))
+  (if (is-eq tx-sender contract-owner)
+    (begin
+      (if active
+        (map-set operators { user: who } { active: true })
+        (map-delete operators { user: who }))
+      (ok true))
+    (err err-not-owner)))
+
+(define-public (issue (user principal))
+  (if (is-admin tx-sender)
+    (if (is-some (map-get? badges { user: user }))
+      (err err-already-issued)
+      (begin
+        (map-set badges { user: user } { issued: true })
+        (var-set total-issued (+ (var-get total-issued) u1))
+        (ok true)))
+    (err err-not-admin)))
+
+(define-public (revoke (user principal))
+  (if (is-admin tx-sender)
+    (if (is-some (map-get? badges { user: user }))
+      (begin
+        (map-delete badges { user: user })
+        (var-set total-issued (- (var-get total-issued) u1))
+        (ok true))
+      (err err-not-issued))
+    (err err-not-admin)))
+
+(define-read-only (has-badge (user principal))
+  (is-some (map-get? badges { user: user })))
+
+(define-read-only (get-badge (user principal))
+  (map-get? badges { user: user }))
+
+(define-read-only (get-total-issued)
+  (var-get total-issued))
 (define-constant err-owner-only (err u100))
 (define-constant err-event-not-found (err u101))
 (define-constant err-event-not-active (err u102))
